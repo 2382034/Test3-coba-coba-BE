@@ -1,19 +1,16 @@
 // DataMahasiswa/data.service.ts
 import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, DeepPartial, Like, Not, ILike } from 'typeorm'; // Added Like, Not, ILike
+import { Repository, DataSource, DeepPartial, Not, ILike } from 'typeorm'; // Menambahkan Like, Not, ILike
 import { Prodi, Mahasiswa, Alamat } from './data.entity';
 import {
   CreateProdiDto, UpdateProdiDto,
   CreateMahasiswaDto, UpdateMahasiswaDto,
-  FindMahasiswaQueryDto, SortOrder, // Import new DTO and Enum
-  CreateAlamatDto, UpdateAlamatDto, SortMahasiswaBy // For custom address validation
+  FindMahasiswaQueryDto, SortOrder,
+  CreateAlamatDto, UpdateAlamatDto, SortMahasiswaBy
 } from './create-data.dto';
-import * as fs from 'fs'; // For file system operations (deleting old photo)
-import * as path from 'path'; // For path operations
-import { MAHASISWA_FOTO_PATH } from './constants';
-
-
+// fs, path, dan MAHASISWA_FOTO_PATH tidak diperlukan jika Vercel Blob adalah satu-satunya sumber
+// dan tidak ada operasi file lokal untuk foto
 
 @Injectable()
 export class DataService {
@@ -27,11 +24,11 @@ export class DataService {
     private dataSource: DataSource,
   ) {}
 
-  // --- Custom Validation/Normalization ---
+  // --- Validasi/Normalisasi Kustom ---
   private async validateNIMUniqueness(nim: string, currentMahasiswaId?: number): Promise<void> {
     const queryOptions: any = { nim };
     if (currentMahasiswaId) {
-      queryOptions.id = Not(currentMahasiswaId); // Check NIM for other students
+      queryOptions.id = Not(currentMahasiswaId); // Periksa NIM untuk mahasiswa lain
     }
     const existingMahasiswa = await this.mahasiswaRepository.findOne({ where: queryOptions });
     if (existingMahasiswa) {
@@ -40,32 +37,29 @@ export class DataService {
   }
 
   private isValidAlamat(alamat: CreateAlamatDto | UpdateAlamatDto): boolean {
-    if (!alamat) return true; // If no alamat provided (e.g. partial update), consider it valid for this check
+    if (!alamat) return true; // Jika tidak ada alamat yang diberikan (mis. pembaruan sebagian), anggap valid untuk pemeriksaan ini
     
-    // Example: Kode Pos must be 5 digits
-    if (alamat.kode_pos && !/^\d{5}$/.test(alamat.kode_pos.replace(/\s+/g, ''))) { // Remove spaces before check
+    if (alamat.kode_pos && !/^\d{5}$/.test(alamat.kode_pos.replace(/\s+/g, ''))) { // Hapus spasi sebelum pemeriksaan
       throw new BadRequestException('Format Kode Pos tidak valid. Harus terdiri dari 5 angka.');
     }
-    // Add more address validation rules as needed
-    // e.g., check if provinsi is in a predefined list, etc.
     return true;
   }
 
-  private normalizeNama(nama: string): string {
-    if (!nama) return nama;
-    return nama.trim().toLowerCase().replace(/\b\w/g, char => char.toUpperCase());
-  }
+  // private normalizeNama(nama: string): string { // DTO @Transform menangani ini
+  //   if (!nama) return nama;
+  //   return nama.trim().toLowerCase().replace(/\b\w/g, char => char.toUpperCase());
+  // }
 
-  // --- Prodi Service Methods --- (No change)
+  // --- Metode Layanan Prodi ---
   async createProdi(createProdiDto: CreateProdiDto): Promise<Prodi> {
     const prodi = this.prodiRepository.create(createProdiDto);
     try {
       return await this.prodiRepository.save(prodi);
     } catch (error) {
-      if (error.code === '23505') {
+      if (error.code === '23505') { // Pelanggaran batasan unik (unique constraint violation)
         throw new BadRequestException('Nama prodi sudah ada.');
       }
-      console.error('Error creating prodi:', error);
+      console.error('Error saat membuat prodi:', error);
       throw new InternalServerErrorException('Gagal membuat prodi.');
     }
   }
@@ -83,11 +77,17 @@ export class DataService {
   }
 
   async updateProdi(id: number, updateProdiDto: UpdateProdiDto): Promise<Prodi> {
-    const result = await this.prodiRepository.update(id, updateProdiDto);
-    if (result.affected === 0) {
-      throw new NotFoundException(`Prodi dengan ID "${id}" tidak ditemukan.`);
+    const prodiToUpdate = await this.findOneProdi(id); // Memastikan prodi ada
+    this.prodiRepository.merge(prodiToUpdate, updateProdiDto);
+    try {
+      return await this.prodiRepository.save(prodiToUpdate);
+    } catch (error) {
+      if (error.code === '23505') {
+        throw new BadRequestException('Nama prodi sudah ada (konflik dengan data lain).');
+      }
+      console.error('Error saat memperbarui prodi:', error);
+      throw new InternalServerErrorException('Gagal memperbarui prodi.');
     }
-    return this.findOneProdi(id);
   }
 
   async removeProdi(id: number): Promise<void> {
@@ -97,50 +97,54 @@ export class DataService {
     }
   }
 
-  // --- Mahasiswa Service Methods ---
+  // --- Metode Layanan Mahasiswa ---
   async createMahasiswa(createMahasiswaDto: CreateMahasiswaDto): Promise<Mahasiswa> {
     const { prodi_id, alamat: alamatDto, nim, nama, ...mahasiswaData } = createMahasiswaDto;
 
-    // Custom NIM validation
     await this.validateNIMUniqueness(nim);
-
-    // Custom Alamat validation
     this.isValidAlamat(alamatDto); 
 
-    // Normalize Nama (DTO transform handles this, but can be done here too)
-    // const normalizedNama = this.normalizeNama(nama);
-
-    const prodi = await this.findOneProdi(prodi_id);
+    const prodi = await this.findOneProdi(prodi_id); // Akan melempar NotFoundException jika prodi tidak ditemukan
 
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
     try {
+      // Alamat dibuat terlebih dahulu karena Mahasiswa mungkin bergantung pada ID-nya jika tidak menggunakan cascade dengan benar,
+      // atau hanya untuk memastikan itu ada sebelum diasosiasikan. Dengan cascade, TypeORM menangani urutannya.
       const alamat = queryRunner.manager.create(Alamat, alamatDto);
+      // Tidak perlu menyimpan alamat secara terpisah jika cascade:true pada Mahasiswa.alamat
+
       const mahasiswa = queryRunner.manager.create(Mahasiswa, {
         ...mahasiswaData,
-        nim, // Use original nim
-        nama, // Use DTO transformed nama or normalizedNama if done here
-        prodi: prodi,
-        alamat: alamat,
+        nim,
+        nama, // DTO @Transform seharusnya menangani kapitalisasi
+        prodi: prodi, // Tetapkan objek prodi penuh
+        prodi_id: prodi.id, // Juga tetapkan FK secara eksplisit
+        alamat: alamat, // Tetapkan objek alamat untuk di-cascade
       });
       
-      const savedMahasiswa = await queryRunner.manager.save(Mahasiswa, mahasiswa);
+      // Foto mahasiswa akan null pada awalnya atau dapat diatur jika createMahasiswaDto menyertakannya
+      // dan itu hanya URL (bukan unggahan file yang ditangani oleh metode ini).
+      // Pengaturan saat ini: foto diunggah melalui endpoint terpisah.
+
+      const savedMahasiswa = await queryRunner.manager.save(Mahasiswa, mahasiswa); // Ini juga akan menyimpan alamat yang di-cascade
       await queryRunner.commitTransaction();
       
+      // Ambil ulang untuk memastikan semua relasi (terutama yang eager) dimuat seperti yang diharapkan oleh frontend
       return await this.mahasiswaRepository.findOneOrFail({ 
         where: { id: savedMahasiswa.id },
-        relations: ['prodi', 'alamat'], // Ensure relations are loaded
+        relations: ['prodi', 'alamat'],
       });
 
     } catch (error) {
       await queryRunner.rollbackTransaction();
-      if (error instanceof BadRequestException) throw error; // Re-throw custom validation errors
+      if (error instanceof BadRequestException || error instanceof NotFoundException) throw error;
       if (error.code === '23505' && error.detail && error.detail.includes('(nim)')) {
         throw new BadRequestException('NIM sudah digunakan.');
       }
-      console.error('Error creating mahasiswa:', error);
+      console.error('Error saat membuat mahasiswa:', error);
       throw new InternalServerErrorException('Gagal membuat mahasiswa.');
     } finally {
       await queryRunner.release();
@@ -148,7 +152,7 @@ export class DataService {
   }
 
   async findAllMahasiswa(queryDto: FindMahasiswaQueryDto): Promise<{ data: Mahasiswa[], count: number, currentPage: number, totalPages: number }> {
-    const { search, prodi_id, sortBy, sortOrder, page = 1, limit = 10 } = queryDto;
+    const { search, prodi_id, sortBy = SortMahasiswaBy.NAMA, sortOrder = SortOrder.ASC, page = 1, limit = 10 } = queryDto;
     const skip = (page - 1) * limit;
 
     const query = this.mahasiswaRepository.createQueryBuilder('mahasiswa')
@@ -162,11 +166,8 @@ export class DataService {
     if (prodi_id) {
       query.andWhere('mahasiswa.prodi_id = :prodi_id', { prodi_id });
     }
-
-    // CORRECTED/SIMPLIFIED SORTING:
-    // sortBy is guaranteed to be 'nama' or 'nim' by DTO validation and default value.
-    query.orderBy(`mahasiswa.${sortBy}`, sortOrder); 
     
+    query.orderBy(`mahasiswa.${sortBy}`, sortOrder); 
     query.skip(skip).take(limit);
 
     const [data, count] = await query.getManyAndCount();
@@ -178,7 +179,7 @@ export class DataService {
   async findOneMahasiswa(id: number): Promise<Mahasiswa> {
     const mahasiswa = await this.mahasiswaRepository.findOne({ 
         where: { id },
-        relations: ['prodi', 'alamat'], // Eager load relations
+        relations: ['prodi', 'alamat'], // Pastikan relasi dimuat
     });
     if (!mahasiswa) {
       throw new NotFoundException(`Mahasiswa dengan ID "${id}" tidak ditemukan.`);
@@ -187,6 +188,7 @@ export class DataService {
   }
 
   async updateMahasiswa(id: number, updateMahasiswaDto: UpdateMahasiswaDto): Promise<Mahasiswa> {
+    // Ambil mahasiswa yang ada beserta relasinya
     const mahasiswaToUpdate = await this.mahasiswaRepository.findOne({
         where: { id },
         relations: ['prodi', 'alamat'], 
@@ -196,33 +198,33 @@ export class DataService {
         throw new NotFoundException(`Mahasiswa dengan ID "${id}" tidak ditemukan.`);
     }
     
-    const { prodi_id, alamat: alamatDto, nim, nama, ...mahasiswaData } = updateMahasiswaDto;
+    const { prodi_id, alamat: alamatDto, nim, nama, foto, ...otherMahasiswaData } = updateMahasiswaDto;
 
-    // Custom NIM validation if NIM is being changed
     if (nim && nim !== mahasiswaToUpdate.nim) {
       await this.validateNIMUniqueness(nim, id);
     }
 
-    // Custom Alamat validation
     if (alamatDto) {
-        this.isValidAlamat(alamatDto as UpdateAlamatDto); // Cast to UpdateAlamatDto
+        this.isValidAlamat(alamatDto as UpdateAlamatDto);
     }
     
-    // Normalize Nama if provided (DTO transform handles this, but can be done here too)
-    // if (nama) {
-    //   mahasiswaData.nama = this.normalizeNama(nama);
-    // }
-
-
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
     try {
-        // Merge basic data (including potentially normalized nama from DTO or service)
-        this.mahasiswaRepository.merge(mahasiswaToUpdate, { ...mahasiswaData, nim, nama } as Partial<Mahasiswa>);
+        // Gabungkan data dasar. DTO @Transform menangani kapitalisasi nama.
+        // 'foto' mungkin diteruskan sebagai null atau URL baru jika tidak ditangani oleh endpoint terpisah.
+        // Jika 'foto' berasal dari DTO ini, diasumsikan sebagai URL.
+        // Jika 'foto' di DTO adalah undefined, itu tidak akan menimpa yang ada. Jika null, akan menimpa.
+        const updatePayload: Partial<Mahasiswa> = { ...otherMahasiswaData };
+        if (nama !== undefined) updatePayload.nama = nama; // DTO Transform menanganinya
+        if (nim !== undefined) updatePayload.nim = nim;
+        if (foto !== undefined) updatePayload.foto = foto; // foto bisa diatur menjadi null di sini
 
+        this.mahasiswaRepository.merge(mahasiswaToUpdate, updatePayload);
 
+        // Tangani perubahan Prodi
         if (Object.prototype.hasOwnProperty.call(updateMahasiswaDto, 'prodi_id')) {
             if (updateMahasiswaDto.prodi_id === null) {
                 mahasiswaToUpdate.prodi = null;
@@ -235,27 +237,33 @@ export class DataService {
                 mahasiswaToUpdate.prodi = prodi;
                 mahasiswaToUpdate.prodi_id = prodi.id; 
             }
+            // Jika prodi_id adalah undefined di DTO, prodi tidak diubah.
         }
 
+        // Tangani perubahan Alamat
         if (Object.prototype.hasOwnProperty.call(updateMahasiswaDto, 'alamat')) {
-            if (updateMahasiswaDto.alamat === null) {
+            if (updateMahasiswaDto.alamat === null) { // Hapus alamat secara eksplisit
                 if (mahasiswaToUpdate.alamat) {
                     await queryRunner.manager.remove(Alamat, mahasiswaToUpdate.alamat); 
                     mahasiswaToUpdate.alamat = null; 
                 }
-            } else if (updateMahasiswaDto.alamat) { 
-                if (mahasiswaToUpdate.alamat) {
-                    this.alamatRepository.merge(mahasiswaToUpdate.alamat, updateMahasiswaDto.alamat as Partial<Alamat>);
-                } else {
-                    const newAlamat = this.alamatRepository.create(updateMahasiswaDto.alamat as DeepPartial<Alamat>);
-                    mahasiswaToUpdate.alamat = newAlamat;
+            } else if (updateMahasiswaDto.alamat) { // Perbarui atau buat alamat
+                if (mahasiswaToUpdate.alamat) { // Alamat ada, gabungkan perubahan
+                    // Pastikan menggunakan manager dari queryRunner untuk operasi dalam transaksi
+                    queryRunner.manager.merge(Alamat, mahasiswaToUpdate.alamat, updateMahasiswaDto.alamat as Partial<Alamat>);
+                } else { // Alamat tidak ada, buat baru dan tetapkan
+                    const newAlamat = queryRunner.manager.create(Alamat, updateMahasiswaDto.alamat as DeepPartial<Alamat>);
+                    mahasiswaToUpdate.alamat = newAlamat; // Akan di-cascade saat disimpan
                 }
             }
+             // Jika alamat adalah undefined di DTO, itu tidak diubah.
         }
         
+        // Simpan mahasiswa. Alamat yang di-cascade akan disimpan.
         const savedResult = await queryRunner.manager.save(Mahasiswa, mahasiswaToUpdate);
         await queryRunner.commitTransaction();
         
+        // Ambil ulang untuk memastikan semua relasi dimuat dengan benar
         return await this.mahasiswaRepository.findOneOrFail({
             where: { id: savedResult.id },
             relations: ['prodi', 'alamat'],
@@ -271,7 +279,7 @@ export class DataService {
         if (error.code === '23505' && error.detail && error.detail.includes('nim')) {
             throw new BadRequestException('NIM sudah digunakan.');
         }
-        console.error('Error updating mahasiswa:', error.message, error.stack);
+        console.error('Error saat memperbarui mahasiswa:', error.message, error.stack);
         throw new InternalServerErrorException('Gagal memperbarui mahasiswa.');
     } finally {
         if (!queryRunner.isReleased) {
@@ -280,47 +288,30 @@ export class DataService {
     }
   }
 
-  async updateMahasiswaFoto(id: number, fotoFilename: string): Promise<Mahasiswa> {
-    const mahasiswa = await this.findOneMahasiswa(id); // findOneMahasiswa already throws NotFoundException
+  async updateMahasiswaFoto(id: number, fotoUrlFromBlob: string): Promise<Mahasiswa> {
+    const mahasiswa = await this.findOneMahasiswa(id); // findOneMahasiswa sudah melempar NotFoundException
 
-    // Delete old photo if it exists
-    if (mahasiswa.foto) {
-      const oldFotoPath = path.join(`./${MAHASISWA_FOTO_PATH}`, mahasiswa.foto);
-      if (fs.existsSync(oldFotoPath)) {
-        try {
-          fs.unlinkSync(oldFotoPath);
-        } catch (err) {
-          console.error('Failed to delete old photo:', oldFotoPath, err);
-          // Decide if this should be a critical error. Usually not.
-        }
-      }
-    }
-
-    mahasiswa.foto = fotoFilename; // filename will be like 'uuid.ext'
+    // Foto lama di Vercel Blob seharusnya sudah dihapus oleh controller
+    // *sebelum* memanggil metode layanan ini jika foto baru diunggah.
+    // Metode layanan ini hanya memperbarui catatan DB dengan URL baru.
+    mahasiswa.foto = fotoUrlFromBlob; // Simpan URL lengkap dari Vercel Blob
     await this.mahasiswaRepository.save(mahasiswa);
     return mahasiswa;
   }
 
-
   async removeMahasiswa(id: number): Promise<void> {
-    const mahasiswa = await this.findOneMahasiswa(id); // Check if exists and get data
+    // Controller seharusnya sudah memanggil findOneMahasiswa untuk mendapatkan data (mis. URL foto untuk dihapus dari Blob)
+    // dan menangani penghapusan Vercel Blob. Metode layanan ini berfokus pada penghapusan catatan DB.
+    // Kita masih bisa memanggil findOneMahasiswa di sini untuk memastikan itu ada sebelum mencoba menghapus,
+    // atau mengandalkan controller yang telah melakukannya.
+    const mahasiswa = await this.findOneMahasiswa(id); // Memastikan itu ada dan melempar NotFound jika tidak.
+    
+    // Penghapusan cascade untuk Alamat ditangani oleh TypeORM/DB berdasarkan relasi Mahasiswa.alamat (`cascade: true`, `onDelete: 'CASCADE'`).
+    // Tidak perlu menghapus catatan Alamat secara manual di sini jika cascade diatur dengan benar.
 
-    // Delete associated photo file
-    if (mahasiswa.foto) {
-      const fotoPath = path.join(`./${MAHASISWA_FOTO_PATH}`, mahasiswa.foto);
-      if (fs.existsSync(fotoPath)) {
-        try {
-          fs.unlinkSync(fotoPath);
-        } catch (err) {
-          console.error('Failed to delete photo on removeMahasiswa:', fotoPath, err);
-          // Log error, but proceed with DB deletion
-        }
-      }
-    }
-
-    const result = await this.mahasiswaRepository.delete(id); // Cascade delete for Alamat is handled by DB/TypeORM
+    const result = await this.mahasiswaRepository.delete(id);
     if (result.affected === 0) {
-      // This case should ideally be caught by findOneMahasiswa above
+      // Kasus ini idealnya ditangkap oleh findOneMahasiswa di atas jika dipanggil.
       throw new NotFoundException(`Mahasiswa dengan ID "${id}" tidak ditemukan.`);
     }
   }
