@@ -22,7 +22,7 @@ export class User {
   passwordHash: string; // Nama properti bisa berbeda dari nama kolom
 
   @Column({ type: 'varchar', length: 50, default: 'user' })
-  role: UserRole; // Gunakan tipe UserRole
+  role: string; // Gunakan tipe UserRole
 
   @Column({ name: 'profile_picture', type: 'text', nullable: true })
   profilePicture?: string;
