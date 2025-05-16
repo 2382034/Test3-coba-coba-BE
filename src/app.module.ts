@@ -12,7 +12,7 @@ import { UsersModule } from './user/user.module'; // Ganti UserModule menjadi Us
 import { RecipesModule } from './recipes/recipes.module';
 import { PostingsModule } from './posting/posting.module';
 import { NotesModule } from './notes/notes.module';
-import { DataMahasiswaModule } from './DataMahasiswa/data.module';
+import { DataMahasiswaModule } from './datamahasiswa/data.module';
 
 @Module({
   imports: [
